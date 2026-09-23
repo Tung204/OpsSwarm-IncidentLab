@@ -120,7 +120,6 @@ async def _handle_github_comment(number: int, comment: dict[str, Any], trigger: 
         if comment_id and comment_registry.contains(comment_id):
             log_event("GITHUB_COMMENT_DEDUPLICATED", issue_number=number, comment_id=comment_id, trigger=trigger)
             return False
-        permission = await gh.permission(actor)
         log_event(
             "GITHUB_COMMENT_PROCESSING",
             issue_number=number,
@@ -130,6 +129,7 @@ async def _handle_github_comment(number: int, comment: dict[str, Any], trigger: 
             command=command.name if command else None,
         )
         try:
+            permission = await gh.permission(actor)
             await engine.handle_comment(number, actor, body, permission, command)
         except PermissionError as exc:
             log_event("GITHUB_COMMAND_REJECTED", issue_number=number, actor=actor, comment_id=comment_id, error=str(exc))
@@ -295,11 +295,14 @@ async def alertmanager_webhook(payload: dict[str, Any]):
             "fault_type": labels.get("alertname") or "monitoring-alert",
         }
         if active and active.get("service") == service and active.get("state") not in {"RESOLVED", "STOPPED"}:
+            scenario_id = str(active.get("scenario_id") or "unknown").strip().lower()
+            canonical_key = f"incidentlab:{str(service).strip().lower()}:{scenario_id}"
             event.update({
                 "run_id": active.get("run_id"),
                 "incident_id": active.get("incident_id"),
                 "scenario_id": active.get("scenario_id"),
-                "deduplication_key": f"incidentlab:{active.get('incident_id')}",
+                "correlation_key": canonical_key,
+                "deduplication_key": canonical_key,
                 "incidentlab_reference": f"{os.environ.get('INCIDENTLAB_PUBLIC_URL','http://localhost:8080').rstrip('/')}/api/incidents/{active.get('incident_id')}",
             })
         else:

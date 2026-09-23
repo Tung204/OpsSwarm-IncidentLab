@@ -5,18 +5,31 @@
       timeoutSeconds: 600,
     },
     entries: {
-      "opsswarm-incident-manager": { workspace: "D:/Minto 2026/OpsSwarm-IncidentLab-v1.1/OpsSwarm-IncidentLab-v1.1/openclaw/workspaces/opsswarm-incident-manager" },
-      "opsswarm-observability-investigator": { workspace: "D:/Minto 2026/OpsSwarm-IncidentLab-v1.1/OpsSwarm-IncidentLab-v1.1/openclaw/workspaces/opsswarm-observability-investigator" },
-      "opsswarm-application-investigator": { workspace: "D:/Minto 2026/OpsSwarm-IncidentLab-v1.1/OpsSwarm-IncidentLab-v1.1/openclaw/workspaces/opsswarm-application-investigator" },
-      "opsswarm-infrastructure-investigator": { workspace: "D:/Minto 2026/OpsSwarm-IncidentLab-v1.1/OpsSwarm-IncidentLab-v1.1/openclaw/workspaces/opsswarm-infrastructure-investigator" },
-      "opsswarm-database-investigator": { workspace: "D:/Minto 2026/OpsSwarm-IncidentLab-v1.1/OpsSwarm-IncidentLab-v1.1/openclaw/workspaces/opsswarm-database-investigator" },
-      "opsswarm-recovery-responder": { workspace: "D:/Minto 2026/OpsSwarm-IncidentLab-v1.1/OpsSwarm-IncidentLab-v1.1/openclaw/workspaces/opsswarm-recovery-responder" },
-      "opsswarm-communications-postmortem": { workspace: "D:/Minto 2026/OpsSwarm-IncidentLab-v1.1/OpsSwarm-IncidentLab-v1.1/openclaw/workspaces/opsswarm-communications-postmortem" }
+      "opsswarm-incident-manager": { workspace: "C:/MyFolder/Hoc_Tap/project/Minto/OpsSwarm-IncidentLab/openclaw/workspaces/opsswarm-incident-manager" },
+      "opsswarm-observability-investigator": { workspace: "C:/MyFolder/Hoc_Tap/project/Minto/OpsSwarm-IncidentLab/openclaw/workspaces/opsswarm-observability-investigator" },
+      "opsswarm-application-investigator": { workspace: "C:/MyFolder/Hoc_Tap/project/Minto/OpsSwarm-IncidentLab/openclaw/workspaces/opsswarm-application-investigator" },
+      "opsswarm-infrastructure-investigator": { workspace: "C:/MyFolder/Hoc_Tap/project/Minto/OpsSwarm-IncidentLab/openclaw/workspaces/opsswarm-infrastructure-investigator" },
+      "opsswarm-database-investigator": { workspace: "C:/MyFolder/Hoc_Tap/project/Minto/OpsSwarm-IncidentLab/openclaw/workspaces/opsswarm-database-investigator" },
+      "opsswarm-recovery-responder": { workspace: "C:/MyFolder/Hoc_Tap/project/Minto/OpsSwarm-IncidentLab/openclaw/workspaces/opsswarm-recovery-responder" },
+      "opsswarm-communications-postmortem": { workspace: "C:/MyFolder/Hoc_Tap/project/Minto/OpsSwarm-IncidentLab/openclaw/workspaces/opsswarm-communications-postmortem" }
     }
   },
   skills: {
     load: {
-      extraDirs: ["D:/Minto 2026/OpsSwarm-IncidentLab-v1.1/OpsSwarm-IncidentLab-v1.1/skills-enterprise"]
+      extraDirs: ["C:/MyFolder/Hoc_Tap/project/Minto/OpsSwarm-IncidentLab/skills-enterprise"]
+    }
+  },
+  plugins: {
+    entries: {
+      codex: {
+        enabled: true,
+        config: {
+          appServer: {
+            homeScope: "user",
+            command: "C:/Users/nguye/AppData/Roaming/npm/codex.cmd"
+          }
+        }
+      }
     }
   },
   gateway: {

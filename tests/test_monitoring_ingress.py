@@ -92,6 +92,51 @@ def test_correlation_is_transport_independent():
     assert incident_correlation_key(incidentlab) == incident_correlation_key(alertmanager)
 
 
+def test_alertmanager_reuses_active_incidentlab_issue(tmp_path, monkeypatch):
+    from opsswarm import incidentlab
+    from opsswarm import tool_adapter
+
+    fake = FakeGitHub()
+    monkeypatch.setattr(api, "gh", fake)
+    monkeypatch.setattr(api, "issue_registry", MonitoringIssueRegistry(str(tmp_path)))
+    monkeypatch.setattr(
+        incidentlab,
+        "latest",
+        lambda: {
+            "run_id": "RUN-LAB-test",
+            "incident_id": "INC-LAB-test",
+            "scenario_id": "booking-api-high-5xx",
+            "service": "booking-api",
+            "state": "ISSUE_CREATED",
+        },
+    )
+    monkeypatch.setattr(tool_adapter, "getm", lambda service: {"service": service, "error_rate": 0.42})
+
+    direct = payload()
+    direct["correlation_key"] = "incidentlab:booking-api:booking-api-high-5xx"
+    direct["deduplication_key"] = direct["correlation_key"]
+    first = asyncio.run(api.monitoring_event(direct))
+    second = asyncio.run(
+        api.alertmanager_webhook(
+            {
+                "alerts": [
+                    {
+                        "status": "firing",
+                        "labels": {"service": "booking-api", "severity": "critical", "alertname": "High5xx"},
+                        "annotations": {"description": "booking-api elevated 5xx"},
+                        "startsAt": "2026-09-23T01:00:01Z",
+                        "fingerprint": "abc123",
+                    }
+                ]
+            }
+        )
+    )
+
+    assert second["results"][0]["issue_number"] == first["issue_number"]
+    assert second["results"][0]["deduplicated"] is True
+    assert len(fake.created) == 1
+
+
 def test_incident_title_is_canonical_and_not_incidentlab_prefixed(tmp_path, monkeypatch):
     fake = FakeGitHub()
     monkeypatch.setattr(api, "gh", fake)
@@ -183,6 +228,35 @@ def test_polled_command_is_queued_without_blocking_watcher(monkeypatch, tmp_path
         assert 4242 not in api.comment_inflight
 
     asyncio.run(run())
+
+
+def test_permission_lookup_failure_marks_command_processed(monkeypatch, tmp_path):
+    from opsswarm.monitoring import ProcessedCommentRegistry
+
+    class PermissionFailureGitHub:
+        def __init__(self):
+            self.comments = []
+
+        async def permission(self, username):
+            raise RuntimeError("permission lookup unavailable")
+
+        async def comment(self, number, body):
+            self.comments.append((number, body))
+            return {"id": 1}
+
+    fake = PermissionFailureGitHub()
+    registry = ProcessedCommentRegistry(str(tmp_path))
+    monkeypatch.setattr(api, "gh", fake)
+    monkeypatch.setattr(api, "comment_registry", registry)
+    comment = {"id": 5150, "body": "/opsswarm abort", "user": {"login": "reader"}}
+
+    first = asyncio.run(api._handle_github_comment(40, comment, "poll"))
+    second = asyncio.run(api._handle_github_comment(40, comment, "poll"))
+
+    assert first is True
+    assert second is False
+    assert registry.contains(5150)
+    assert len(fake.comments) == 1
 
 
 def test_github_client_rejects_invalid_issue_state_without_network():
