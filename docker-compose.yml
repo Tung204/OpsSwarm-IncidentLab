@@ -1,8 +1,8 @@
 services:
-  opsswarm:
+  incidentlab:
     build:
       context: .
-      dockerfile: opsswarm/Dockerfile
+      dockerfile: incidentlab/Dockerfile
     ports: ["8080:8080"]
     environment:
       - PYTHONUNBUFFERED=1
@@ -12,15 +12,10 @@ services:
       - PAYMENT_URL=http://payment:8000
       - BOOKING_API_URL=http://booking-api:8000
       - PROMETHEUS_URL=http://prometheus:9090
-      - GITHUB_REPO=${GITHUB_REPO}
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
-      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
-      - INCIDENTLAB_MONITORING_URL=http://127.0.0.1:8080/hooks/monitoring
-      - OPSSWARM_GITHUB_POLL_SECONDS=${OPSSWARM_GITHUB_POLL_SECONDS:-5}
-      - OPSWARM_DATA_DIR=/app/runtime-data
-      - OPSWARM_OPENCLAW_GATEWAY_URL=${OPSWARM_OPENCLAW_GATEWAY_URL:-http://host.docker.internal:18789}
-      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}
+      - INCIDENTLAB_MONITORING_URL=${INCIDENTLAB_MONITORING_URL:-http://host.docker.internal:18088/hooks/monitoring}
       - INCIDENTLAB_PUBLIC_URL=${INCIDENTLAB_PUBLIC_URL:-http://localhost:8080}
+      - INCIDENTLAB_CONTROL_TOKEN=${INCIDENTLAB_CONTROL_TOKEN}
+      - INCIDENTLAB_DATA_DIR=/app/runtime-data
     volumes:
       - ./runtime-data:/app/runtime-data
     extra_hosts:

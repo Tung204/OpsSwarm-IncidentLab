@@ -1,16 +1,26 @@
 from __future__ import annotations
-import json, os, threading, uuid, urllib.request
-from datetime import datetime, timezone
+
+import hmac
+import json
+import os
+import threading
+import urllib.error
+import urllib.request
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from fastapi import APIRouter, HTTPException
+
+import requests
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
 from . import tool_adapter as tools
-from .monitoring import log_event
+from .logging import log_event
 
 router = APIRouter(prefix="/api")
-DATA = Path(os.getenv("OPSWARM_DATA_DIR", "runtime-data")) / "incidentlab"
+DATA = Path(os.getenv("INCIDENTLAB_DATA_DIR", "runtime-data")) / "incidentlab"
 RUNS = DATA / "runs"
 RUNS.mkdir(parents=True, exist_ok=True)
 LOCK = threading.RLock()
@@ -47,7 +57,7 @@ class FaultRequest(BaseModel):
     scenario_id: str
 
 
-def now() -> str: return datetime.now(timezone.utc).isoformat()
+def now() -> str: return datetime.now(UTC).isoformat()
 
 def _write(run: dict[str, Any]) -> None:
     (RUNS / f"{run['run_id']}.json").write_text(json.dumps(run, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -58,7 +68,7 @@ def _services() -> dict[str, Any]:
         try:
             out[name]=tools.getm(name)
             out[name]["status"]="HEALTHY" if out[name].get("healthy") else "DEGRADED"
-        except Exception as exc:
+        except (requests.RequestException, ValueError, KeyError) as exc:
             out[name]={"service":name,"healthy":False,"status":"UNAVAILABLE","error":str(exc)}
     return out
 
@@ -80,10 +90,21 @@ def _new_run(scenario_id: str):
     s=SCENARIOS[scenario_id]
     rid=f"RUN-LAB-{uuid.uuid4().hex[:10]}"
     iid=f"INC-LAB-{uuid.uuid4().hex[:8]}"
-    stages={k:{"state":"PENDING"} for k in ["S8","S1","S2","S4","S5","RCA","S3","Policy","Recovery","S6","S7"]}
-    run={"run_id":rid,"incident_id":iid,"scenario_id":scenario_id,"service":s["service"],"severity":s["severity"],"state":"DETECTED","policy_decision":None,"approval_state":"NOT_REQUIRED","recovery_state":"NOT_STARTED","verification_state":"PENDING","stages":stages,"timeline":[],"evidence":[],"agent_status":{},"root_cause":None,"recovery_options":s["options"],"created_at":now()}
-    _event(run,"Incident detected","Stateful fault injection activated","S8")
-    _event(run,"Monitoring event generated",scenario_id,"S8")
+    run={
+        "run_id": rid,
+        "incident_id": iid,
+        "scenario_id": scenario_id,
+        "service": s["service"],
+        "severity": s["severity"],
+        "state": "DETECTED",
+        "timeline": [],
+        "evidence": [],
+        "supported_recovery_actions": [x["type"] for x in s.get("options", [])],
+        "monitoring_delivery": None,
+        "created_at": now(),
+    }
+    _event(run,"Incident detected","Stateful fault injection activated","INCIDENTLAB")
+    _event(run,"Monitoring event generated",scenario_id,"INCIDENTLAB")
     return run
 
 def _inject_service(scenario):
@@ -95,25 +116,70 @@ def _inject_service(scenario):
     if scenario.get("faults",{}).get("error_rate",0) >= 0.3:
         tools.set_version(service,"v2.1-bad")
 
-def _apply_recovery(run):
-    option=run["recovery_options"][0]
-    service=run["service"]
-    typ=option["type"]
-    if typ=="rollback":
-        tools.set_version(service,"v2.0")
-        tools.set_fault(service,"error_rate",False)
-        tools.set_fault(service,"latency_ms",False)
-        tools.set_fault(service,"crash",False)
-        tools.set_fault(service,"db_pool_exhausted",False)
-        tools.set_fault(service,"db_down",False)
-        tools.set_fault(service,"external_timeout",False)
-    elif typ=="scale":
-        tools.set_fault(service,"db_pool_exhausted",False)
-        tools.set_fault(service,"error_rate",False)
-        tools.set_fault(service,"latency_ms",False)
-    else:
-        tools.reset_all()
-    return tools.getm(service)
+def correlation_key(service: str, scenario_id: str) -> str:
+    return f"incidentlab:{service.strip().lower()}:{scenario_id.strip().lower()}"
+
+
+def monitoring_payload(run: dict[str, Any], scenario: dict[str, Any], services: dict[str, Any]) -> dict[str, Any]:
+    scenario_id = run["scenario_id"]
+    symptom=(f"error_rate={scenario.get('faults',{}).get('error_rate','n/a')}, "
+             f"latency_ms={scenario.get('faults',{}).get('latency_ms','n/a')}")
+    key = correlation_key(scenario["service"], scenario_id)
+    return {
+        "title": f"[Incident][{scenario['severity']}] {scenario['service']} - {scenario_id}",
+        "service": scenario["service"],
+        "severity": scenario["severity"],
+        "severity_label": f"sev:{scenario['severity'][3:]}",
+        "scenario_id": scenario_id,
+        "symptom": symptom,
+        "customer_impact": "Simulated incident generated by IncidentLab",
+        "environment": "incidentlab",
+        "observed_since": now(),
+        "source": "incidentlab",
+        "run_id": run["run_id"],
+        "incident_id": run["incident_id"],
+        "fault_type": ",".join(scenario.get("faults", {}).keys()),
+        "correlation_key": key,
+        "deduplication_key": key,
+        "metrics": services.get(scenario["service"],{}),
+        "dependencies": _deps(services),
+        "initial_evidence": run["evidence"],
+        "incidentlab_reference": f"{os.getenv('INCIDENTLAB_PUBLIC_URL','http://localhost:8080').rstrip('/')}/api/incidents/{run['incident_id']}",
+    }
+
+
+def _deliver_monitoring(payload: dict[str, Any]) -> dict[str, Any]:
+    ingress=os.getenv("INCIDENTLAB_MONITORING_URL","http://host.docker.internal:18088/hooks/monitoring")
+    req=urllib.request.Request(
+        ingress,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type":"application/json"},
+        method="POST",
+    )
+    log_event(
+        "MONITORING_EVENT_SENT",
+        incident_id=payload.get("incident_id"),
+        incidentlab_run_id=payload.get("run_id"),
+        scenario_id=payload.get("scenario_id"),
+        service=payload.get("service"),
+        monitoring_url=ingress,
+        correlation_key=payload.get("correlation_key"),
+    )
+    try:
+        with urllib.request.urlopen(req,timeout=15) as resp:
+            result=json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        log_event(
+            "MONITORING_EVENT_UNAVAILABLE",
+            incident_id=payload.get("incident_id"),
+            incidentlab_run_id=payload.get("run_id"),
+            scenario_id=payload.get("scenario_id"),
+            service=payload.get("service"),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return {"delivered":False,"monitoring_url":ingress,"error":f"{type(exc).__name__}: {exc}"}
+    return {"delivered":True,"monitoring_url":ingress,**(result if isinstance(result,dict) else {"response":result})}
 
 def start_demo(scenario_id):
     if scenario_id not in SCENARIOS: raise HTTPException(404,"unknown scenario")
@@ -124,47 +190,16 @@ def start_demo(scenario_id):
         services=_services()
         log_event("INCIDENTLAB_FAULT_INJECTED", incident_id=run["incident_id"], incidentlab_run_id=run["run_id"], scenario_id=scenario_id, service=run["service"])
         _evidence(run,"INCIDENTLAB","simulated-monitoring","fault injection",{"scenario":scenario_id,"services":services})
-        symptom=(f"error_rate={scenario.get('faults',{}).get('error_rate','n/a')}, "
-                 f"latency_ms={scenario.get('faults',{}).get('latency_ms','n/a')}")
-        payload={
-            "title": f"[IncidentLab][{scenario['severity']}] {scenario['service']} - {scenario_id}",
-            "service": scenario["service"],
-            "severity": scenario["severity"],
-            "severity_label": f"sev:{scenario['severity'][3:]}",
-            "scenario_id": scenario_id,
-            "symptom": symptom,
-            "customer_impact": "Simulated incident generated by IncidentLab",
-            "environment": "incidentlab",
-            "observed_since": now(),
-            "source": "incidentlab",
-            "run_id": run["run_id"],
-            "incident_id": run["incident_id"],
-            "fault_type": ",".join(scenario.get("faults", {}).keys()),
-            "correlation_key": f"incidentlab:{str(scenario.get('service','unknown')).strip().lower()}:{str(scenario_id).strip().lower()}",
-            "deduplication_key": f"incidentlab:{str(scenario.get('service','unknown')).strip().lower()}:{str(scenario_id).strip().lower()}",
-            "metrics": services.get(scenario["service"],{}),
-            "dependencies": _deps(services),
-            "initial_evidence": run["evidence"],
-            "incidentlab_reference": f"{os.getenv('INCIDENTLAB_PUBLIC_URL','http://localhost:8080').rstrip('/')}/api/incidents/{run['incident_id']}",
-        }
-        ingress=os.getenv("INCIDENTLAB_MONITORING_URL","http://127.0.0.1:8080/hooks/monitoring")
-        req=urllib.request.Request(ingress,data=json.dumps(payload).encode("utf-8"),headers={"Content-Type":"application/json"},method="POST")
-        log_event("MONITORING_EVENT_SENT", incident_id=run["incident_id"], incidentlab_run_id=run["run_id"], scenario_id=scenario_id, service=run["service"], monitoring_url=ingress, deduplication_key=payload["deduplication_key"])
-        try:
-            with urllib.request.urlopen(req,timeout=15) as resp:
-                result=json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:
-            log_event("MONITORING_EVENT_FAILED", incident_id=run["incident_id"], incidentlab_run_id=run["run_id"], scenario_id=scenario_id, service=run["service"], error_type=type(exc).__name__, error=str(exc))
-            _event(run,"Monitoring ingress failed",str(exc),"INCIDENTLAB","FAILED")
-            _write(run)
-            raise HTTPException(502,f"Monitoring ingress failed: {exc}")
-        log_event("MONITORING_EVENT_ACCEPTED", incident_id=run["incident_id"], incidentlab_run_id=run["run_id"], scenario_id=scenario_id, service=run["service"], issue_number=result.get("issue_number"), issue_url=result.get("issue_url"), deduplicated=result.get("deduplicated", False))
-        run["github_issue_number"]=result.get("issue_number")
-        run["github_issue_url"]=result.get("issue_url")
-        run["state"]="ISSUE_CREATED"
-        run["stages"]["S8"]["state"]="WAITING_WEBHOOK"
-        _event(run,"GitHub Issue created",result.get("issue_url") or result.get("issue_number"),"S8","COMPLETED")
-        _event(run,"Waiting for GitHub issues.opened webhook","OpsSwarm starts orchestration only from GitHub webhook","S8","WAITING")
+        payload=monitoring_payload(run,scenario,services)
+        result=_deliver_monitoring(payload)
+        run["monitoring_delivery"]=result
+        if result.get("delivered"):
+            run["github_issue_number"]=result.get("issue_number")
+            run["github_issue_url"]=result.get("issue_url")
+            run["state"]="MONITORING_DELIVERED"
+            _event(run,"Monitoring ingress accepted",result.get("issue_url") or result.get("issue_number"),"INCIDENTLAB","COMPLETED")
+        else:
+            _event(run,"Monitoring ingress unavailable",result.get("error"),"INCIDENTLAB","UNAVAILABLE")
         _write(run)
         return run
 
@@ -176,6 +211,22 @@ def get_run(run_id):
     p=RUNS/f"{run_id}.json"
     if not p.exists(): raise HTTPException(404,"run not found")
     return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _require_control_token(authorization: str | None) -> None:
+    expected = os.getenv("INCIDENTLAB_CONTROL_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(503, "IncidentLab recovery control token is not configured")
+    supplied = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        supplied = authorization[7:].strip()
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(401, "Invalid IncidentLab recovery control token")
+
+
+def _clear_service_faults(service: str) -> None:
+    for fault in ["error_rate", "latency_ms", "crash", "db_pool_exhausted", "db_down", "external_timeout"]:
+        tools.set_fault(service, fault, False)
 
 @router.get("/health")
 def api_health(): return {"ok":True,"component":"incidentlab","mode":"stateful-simulator"}
@@ -217,23 +268,83 @@ def reset():
         tools.reset_all()
         return {"reset":True,"services":_services()}
 
+
+@router.post("/v1/alertmanager")
+def alertmanager_webhook(payload: dict[str, Any]):
+    results=[]
+    active=latest()
+    for alert in payload.get("alerts") or []:
+        if alert.get("status") != "firing":
+            continue
+        labels=alert.get("labels") or {}
+        annotations=alert.get("annotations") or {}
+        service=str(labels.get("service") or "unknown")
+        scenario_id=(active or {}).get("scenario_id") if active and active.get("service") == service else str(labels.get("alertname") or "alertmanager").lower()
+        severity_raw=str(labels.get("severity") or "warning").lower()
+        severity="SEV1" if severity_raw in {"critical","sev1","1"} else "SEV2"
+        key=correlation_key(service,scenario_id)
+        services=_services()
+        event={
+            "title": f"[Incident][{severity}] {service} - {scenario_id}",
+            "service": service,
+            "severity": severity,
+            "severity_label": f"sev:{severity[3:]}",
+            "scenario_id": scenario_id,
+            "symptom": annotations.get("description") or annotations.get("summary") or labels.get("alertname") or "Alertmanager firing alert",
+            "customer_impact": "Simulated incident generated by IncidentLab",
+            "environment": "incidentlab",
+            "observed_since": alert.get("startsAt") or now(),
+            "source": "prometheus-alertmanager",
+            "run_id": (active or {}).get("run_id"),
+            "incident_id": (active or {}).get("incident_id"),
+            "correlation_key": key,
+            "deduplication_key": key,
+            "metrics": services.get(service,{}),
+            "dependencies": _deps(services),
+            "initial_evidence": (active or {}).get("evidence",[]),
+            "incidentlab_reference": (
+                f"{os.getenv('INCIDENTLAB_PUBLIC_URL','http://localhost:8080').rstrip('/')}/api/incidents/{active.get('incident_id')}"
+                if active and active.get("incident_id") else None
+            ),
+        }
+        results.append(_deliver_monitoring(event))
+    return {"accepted":True,"results":results}
+
 @router.post("/recovery/restart")
-def restart():
+def restart(authorization: str | None = Header(None)):
+    _require_control_token(authorization)
     r=latest()
     if not r: raise HTTPException(404,"no active run")
-    result=_apply_recovery(r); _event(r,"Recovery API restart executed","Authorized caller changed simulator state","Recovery"); _write(r); return {"ok":True,"state":result}
+    result=tools.post(r["service"],"/admin/reset")
+    _event(r,"Recovery API restart executed","Authenticated external controller changed simulator state","Recovery")
+    _write(r)
+    return {"ok":True,"action":"restart","state":result}
 
 @router.post("/recovery/rollback")
-def rollback():
+def rollback(authorization: str | None = Header(None)):
+    _require_control_token(authorization)
     r=latest()
     if not r: raise HTTPException(404,"no active run")
-    result=_apply_recovery(r); _event(r,"Recovery API rollback executed","Authorized caller changed simulator state","Recovery"); _write(r); return {"ok":True,"state":result}
+    service=r["service"]
+    tools.set_version(service,"v2.0")
+    _clear_service_faults(service)
+    result=tools.getm(service)
+    _event(r,"Recovery API rollback executed","Authenticated external controller changed simulator state","Recovery")
+    _write(r)
+    return {"ok":True,"action":"rollback","state":result}
 
 @router.post("/recovery/scale")
-def scale():
+def scale(authorization: str | None = Header(None)):
+    _require_control_token(authorization)
     r=latest()
     if not r: raise HTTPException(404,"no active run")
-    tools.set_fault(r["service"],"db_pool_exhausted",False); tools.set_fault(r["service"],"error_rate",False); tools.set_fault(r["service"],"latency_ms",False); result=tools.getm(r["service"]); _event(r,"Recovery API scale executed","Authorized caller changed simulator state","Recovery"); _write(r); return {"ok":True,"state":result}
+    tools.set_fault(r["service"],"db_pool_exhausted",False)
+    tools.set_fault(r["service"],"error_rate",False)
+    tools.set_fault(r["service"],"latency_ms",False)
+    result=tools.getm(r["service"])
+    _event(r,"Recovery API scale executed","Authenticated external controller changed simulator state","Recovery")
+    _write(r)
+    return {"ok":True,"action":"scale","state":result}
 
 @router.get("/incidents/{incident_id}")
 def incident(incident_id):
@@ -252,7 +363,7 @@ def evidence():
 def demo_start(req: FaultRequest): return start_demo(req.scenario_id)
 
 @router.post("/demo/approve")
-def demo_approve(req: RecoveryRequest):
+def demo_approve():
     raise HTTPException(410,"Approval is controlled by GitHub /opsswarm approve <option-id>; IncidentLab cannot bypass policy.")
 
 @router.post("/demo/reset")

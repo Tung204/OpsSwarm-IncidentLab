@@ -11,6 +11,7 @@ _pre_enterprise_migration_*/
 .DS_Store
 Thumbs.db
 *.log
+*.egg-info/
 
 openclaw/workspaces/*/DREAMS.md
 openclaw/workspaces/*/memory/

@@ -1,4 +1,5 @@
-﻿import os
+import os
+
 import requests
 
 URLS = {
@@ -17,7 +18,8 @@ def all_metrics():
     out={}
     for service in URLS:
         try: out[service]=getm(service)
-        except Exception as exc: out[service]={"service":service,"healthy":False,"tool_error":str(exc)}
+        except (requests.RequestException, ValueError, KeyError) as exc:
+            out[service]={"service":service,"healthy":False,"tool_error":str(exc)}
     return out
 
 def prometheus_query(query):
@@ -28,7 +30,8 @@ def prometheus_query(query):
 def prometheus_health():
     try:
         r=requests.get(PROMETHEUS_URL+"/-/ready",timeout=3); return {"reachable":r.ok,"status_code":r.status_code}
-    except Exception as exc: return {"reachable":False,"error":str(exc)}
+    except requests.RequestException as exc:
+        return {"reachable":False,"error":str(exc)}
 
 def prometheus_snapshot(service):
     expressions={k:f'demomart_{k}{{service="{service}"}}' for k in ["service_healthy","error_rate","success_rate","latency_ms","cpu_percent","memory_percent","telemetry_present"]}
@@ -36,7 +39,8 @@ def prometheus_snapshot(service):
     for key,expr in expressions.items():
         try:
             result=prometheus_query(expr); out[key]=float(result[0]["value"][1]) if result else None
-        except Exception as exc: out[key]=None; out.setdefault("errors",{})[key]=str(exc)
+        except (requests.RequestException, RuntimeError, ValueError, IndexError, KeyError) as exc:
+            out[key]=None; out.setdefault("errors",{})[key]=str(exc)
     return out
 
 def post(service,path,payload=None):

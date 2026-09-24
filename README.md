@@ -1,131 +1,139 @@
-﻿# OpsSwarm IncidentLab v1.2 Control Center
+# OpsSwarm IncidentLab v1.2
 
-This project is an independent, stateful incident simulation environment for demonstrating the workflow of `OpsSwarm-Enterprise`. It does not merge or vendor the Enterprise codebase.
+IncidentLab is an **independent, stateful target-system simulator** for OpsSwarm Enterprise. It does not contain or vendor the OpsSwarm control plane, S1-S8 orchestration, policy engine, GitHub authority, or OpenClaw workspaces.
 
-## Architecture boundary
+## Ownership boundary
 
-IncidentLab owns only the simulated environment and evidence sources: simulated services/deployment state, metrics/log/evidence snapshots, dependencies, stateful fault injection and recovery APIs, monitoring event generation, and timeline/evidence persistence.
+IncidentLab owns:
 
-OpsSwarm owns workflow authority. The Control Center visualizes the Enterprise lifecycle as telemetry:
+- simulated services and deployment state;
+- stateful fault injection and reset;
+- service/metrics/dependency/evidence APIs;
+- Prometheus + Alertmanager demo telemetry;
+- normalized monitoring delivery to an external OpsSwarm Enterprise instance;
+- authenticated recovery endpoints that an authorized Enterprise executor can call.
 
-`S8 Orchestration Hub -> S1 IntentGuard -> S2 read-only DAG -> S4 specialist dispatch -> S5 evidence/collaboration -> RCA -> S3 HorizonPlan -> Policy -> Recovery -> S6 ResilienceGuard when required -> S7 independent verification -> RESOLVED`
+OpsSwarm Enterprise owns:
 
-OpenClaw is agent runtime, not policy authority. Investigation agents are read-only. Risky writes are represented as `HUMAN_REQUIRED`; the UI displays the GitHub command and does not grant execution authority itself.
+- GitHub Issue creation/correlation and human commands;
+- TaskGraph/orchestration and OpenClaw agents;
+- RCA and action proposals;
+- capability/risk canonicalization and deterministic policy;
+- approval/decision gates;
+- write execution ordering and ambiguity handling;
+- independent S7 verification and final Issue closure.
 
-## Start
+```text
+IncidentLab fault / Alertmanager
+        |
+        v
+normalized monitoring event
+        |
+        v
+OpsSwarm-Enterprise /hooks/monitoring
+        |
+        v
+GitHub Issue -> investigation -> RCA -> action proposal
+        |
+        v
+Capability Gate -> deterministic Policy -> HUMAN/AUTO
+        |
+        v
+Enterprise Action Executor -> IncidentLab authenticated recovery API
+        |
+        v
+independent S7 reads IncidentLab -> RESOLVED only when verified
+```
+
+IncidentLab intentionally remains usable when OpsSwarm Enterprise is unavailable. Fault injection and local evidence still work; monitoring delivery is recorded as unavailable and **does not fall back to embedded orchestration**.
+
+## Start the simulator
+
+Copy `.env.example` to `.env` and set a strong `INCIDENTLAB_CONTROL_TOKEN`. The same secret must be available only to the trusted Enterprise action executor.
 
 ```powershell
 .\scripts\demo-start.ps1
 ```
 
-Open `http://localhost:8080/api/ui`.
+Open the UI at `http://localhost:8080/api/ui`.
 
-Reset:
+Reset or stop:
 
 ```powershell
 .\scripts\demo-reset.ps1
+.\scripts\demo-stop.ps1
 ```
 
-Run a scenario:
+## External Enterprise integration
+
+By default the Dockerized Lab sends normalized monitoring events to:
+
+```text
+http://host.docker.internal:18088/hooks/monitoring
+```
+
+Override it with `INCIDENTLAB_MONITORING_URL` when Enterprise runs elsewhere.
+
+The same incident identity uses the canonical correlation key:
+
+```text
+incidentlab:<service>:<scenario-id>
+```
+
+Direct scenario delivery and Alertmanager delivery therefore converge on the same Enterprise/GitHub incident rather than creating duplicate Issues.
+
+## Recovery boundary
+
+These write endpoints require `Authorization: Bearer <INCIDENTLAB_CONTROL_TOKEN>`:
+
+```text
+POST /api/recovery/restart
+POST /api/recovery/rollback
+POST /api/recovery/scale
+```
+
+Missing token configuration fails closed with HTTP 503; a missing/wrong bearer token returns HTTP 401. IncidentLab has no approval-authority endpoint. Legacy `/api/demo/approve` returns HTTP 410.
+
+Read/evidence endpoints include:
+
+```text
+GET /health
+GET /api/services
+GET /api/services/{name}
+GET /api/metrics
+GET /api/logs
+GET /api/events
+GET /api/dependencies
+GET /api/state
+GET /api/scenarios
+GET /api/evidence
+GET /api/incidents/{id}
+GET /api/incidents/{id}/timeline
+```
+
+## Run a fault without Enterprise
 
 ```powershell
 .\scripts\demo-run.ps1 -Scenario booking-api-high-5xx
 ```
 
-Stop:
+If Enterprise is down, the injected fault remains active and the script reports monitoring delivery as unavailable. This is an expected boundary test, not an implicit fallback.
+
+## True two-repository E2E
+
+Start OpsSwarm Enterprise separately (the local validated setup uses `127.0.0.1:18088`), then run:
 
 ```powershell
-.\scripts\demo-stop.ps1
+.\scripts\demo-e2e.ps1 -Scenario booking-api-high-5xx -EnterpriseUrl http://127.0.0.1:18088
 ```
 
-## Automatic GitHub incident flow
-
-A stateful IncidentLab run sends its monitoring payload to `POST /hooks/monitoring`. OpsSwarm creates the GitHub Issue **before** label synchronization, persists the deduplication mapping, and then attempts to apply labels. A label failure is logged as `ISSUE_LABEL_WARNING` and does not delete the Issue or stop orchestration.
-
-```text
-IncidentLab fault/test
-  -> POST /hooks/monitoring
-  -> GitHub Issue created + deduplication key persisted
-  -> issues.opened webhook OR GitHub polling fallback
-  -> S8 -> S1 -> S2 -> S4 -> S5 -> RCA -> S3 -> Policy
-  -> explicit /opsswarm command when human authority is required
-  -> recovery-responder -> S6 when reconciliation is required
-  -> independent S7 verification
-  -> final report + postmortem -> close Issue only after S7 passes
-```
-
-One monitoring identity maps to one GitHub Issue. Re-sending the same `deduplication_key` returns the existing `issue_number` and logs `ISSUE_DEDUPLICATED`. If an unresolved/failed monitoring Issue is closed outside the governed workflow, the poller treats that as state drift and reopens it; manual Issue closure is not an approval/abort command.
-
-### GitHub webhook and polling
-
-Configure GitHub for `issues` and `issue_comment` events and point it at `<public-base>/webhooks/github`. When `GITHUB_WEBHOOK_SECRET` is set, webhook HMAC verification is mandatory; invalid signatures return HTTP 401.
-
-`OPSSWARM_GITHUB_POLL_SECONDS` is the fallback for environments where GitHub cannot reach the local container. The poller discovers monitoring Issues by the trusted marker embedded in the Issue body, queues orchestration without blocking the watcher, and also consumes explicit `/opsswarm ...` comments.
-
-### OpenClaw Gateway on Windows
-
-OpsSwarm in Docker does **not** execute a local `openclaw` binary. It calls the real OpenClaw Gateway running on Windows over HTTP. Default Docker configuration is:
-
-```text
-OPSWARM_OPENCLAW_GATEWAY_URL=http://host.docker.internal:18789
-```
-
-The integration uses the Gateway OpenResponses endpoint and Bearer authentication from `OPENCLAW_GATEWAY_TOKEN`. Multi-agent sessions are explicitly agent-scoped. Keep the token in `.env`/backend configuration only. Useful host checks are `cmd /c openclaw --version`, `cmd /c openclaw gateway status`, and `cmd /c openclaw agents list`.
-
-Required environment keys are documented in `.env.example`. For the reference repository set `GITHUB_REPO=ZINNODNTU/OpsSwarm-IncidentLab`.
-
-## Stateful simulator API
-
-`GET /api/health`, `/api/services`, `/api/services/{name}`, `/api/metrics`, `/api/logs`, `/api/events`, `/api/dependencies`, `/api/state`, `/api/scenarios`, `/api/evidence`
-
-`POST /api/faults/inject`, `/api/faults/reset`, `/api/recovery/restart`, `/api/recovery/rollback`, `/api/recovery/scale`, `/api/demo/start`, `/api/demo/reset`
-
-`GET /api/incidents/{id}`, `/api/incidents/{id}/timeline`
-
-## Canonical Enterprise-aligned demo
-
-The recommended demo follows the Enterprise control model:
-
-```text
-IncidentLab fault
-  -> monitoring ingress
-  -> one GitHub Issue
-  -> S8 -> S1 -> S2 -> S4 specialist fan-out
-  -> S5 evidence aggregation -> RCA
-  -> S3 recovery plan -> Policy
-  -> GitHub /opsswarm command when human authority is required
-  -> bounded recovery -> S6/S7
-  -> close Issue only after independent verification
-```
-
-Run:
+To exercise the explicit GitHub human gate:
 
 ```powershell
-.\scripts\demo-start.ps1
-.\scripts\demo-e2e.ps1 -Scenario booking-api-high-5xx
+.\scripts\demo-e2e.ps1 -Scenario booking-api-high-5xx -Approve -EnterpriseUrl http://127.0.0.1:18088 -GitHubRepo OWNER/REPO
 ```
 
-For a controlled end-to-end run that posts the explicit GitHub approval command:
-
-```powershell
-.\scripts\demo-e2e.ps1 -Scenario booking-api-high-5xx -Approve
-```
-
-The -Approve switch only posts the exact /opsswarm approve <option-id> command to the GitHub Issue. It does not call a hidden approval or recovery API.
-
-## Primary demo: booking-api-high-5xx
-
-Initial state is approximately `booking-api=HEALTHY`, `error_rate=0.2%`, `latency=180ms`, `database=HEALTHY`.
-
-Injection changes the simulator state to degraded conditions around `42%` errors and `2.8s` latency, with database/dependency evidence showing the injected fault. Recovery changes the simulated state through service admin APIs; it is not a text-only success response.
-
-The default risky rollback path stops at `WAITING FOR GITHUB APPROVAL` and displays:
-
-```text
-/opsswarm approve option-001
-```
-
-After approval, the simulator executes recovery, records recovery/S6 evidence, and S7 independently reads service state. Only a passing verification changes the incident to `RESOLVED` and produces a final report/postmortem.
+`-Approve` posts only the exact `/opsswarm approve <option-id>` command to GitHub. It never calls a hidden Lab approval path. A terminal `FAILED`/`ABORTED` or an approval run that does not reach `RESOLVED` exits non-zero.
 
 ## Scenarios
 
@@ -136,17 +144,12 @@ After approval, the simulator executes recovery, records recovery/S6 evidence, a
 - `failed-deployment`
 - `partial-network-failure`
 
-## UI
+## Tests
 
-The Control Center provides Dashboard, Incidents, Fault Lab, Workflow, Agents, Evidence, Recovery, Verification and Settings navigation areas. Workflow is the primary focus, with `PENDING/RUNNING/WAITING/COMPLETED/FAILED/BLOCKED`, read-only specialist agents, metrics, dependencies, timeline and evidence.
+```powershell
+uv sync --extra dev
+.\.venv\Scripts\python.exe -m pytest -q
+docker compose config -q
+```
 
-## Integration status
-
-The simulator, Docker services, Prometheus and Alertmanager are real local components. Existing OpsSwarm/OpenClaw/GitHub integration remains intact and is not replaced by the simulator. The local demo path is explicitly simulated and does not claim a GitHub/OpenClaw action occurred unless the Enterprise integration path actually did so.
-
-Secrets remain backend/environment configuration and are not embedded in the frontend.
-
-
-## Approval authority
-
-IncidentLab has no execution-authority approval API. Legacy `/api/demo/approve` and `/lab/approve/{incident_id}` routes return HTTP 410 and exist only to fail closed for older clients. Use the exact `/opsswarm approve <option-id>` command shown by OpsSwarm on the GitHub Issue.
+The boundary tests verify that the Lab runs without embedded OpsSwarm, survives Enterprise unavailability, converges monitoring transports on one correlation identity, and rejects unauthenticated recovery writes.

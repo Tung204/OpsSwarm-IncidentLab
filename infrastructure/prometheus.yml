@@ -22,10 +22,4 @@ scrape_configs:
           - payment:8000
           - booking-api:8000
 
-  - job_name: opsswarm
-    metrics_path: /metrics
-    static_configs:
-      - targets:
-          - opsswarm:8080
-
 
