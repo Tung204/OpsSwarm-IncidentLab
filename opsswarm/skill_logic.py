@@ -144,6 +144,8 @@ def _recovery_plan_from_agent(value: dict) -> RecoveryPlan:
         opt["profile"] = profile
         if isinstance(opt.get("capabilities"), str):
             opt["capabilities"] = [opt["capabilities"]]
+        if opt.get("estimated_recovery") is not None and not isinstance(opt.get("estimated_recovery"), str):
+            opt["estimated_recovery"] = str(opt["estimated_recovery"])
         normalized.append(opt)
     item["options"] = normalized
     rec = item.get("recommended_option")

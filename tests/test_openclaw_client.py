@@ -73,6 +73,15 @@ def test_s3_normalization_preserves_and_validates_risk():
         _recovery_plan_from_agent({"options":[{"id":"x","description":"x","risk":"unbounded"}]})
 
 
+def test_s3_normalizes_numeric_estimated_recovery_to_text():
+    from opsswarm.skill_logic import _recovery_plan_from_agent
+    plan = _recovery_plan_from_agent({
+        "options":[{"id":"option-001","description":"rollback service","risk":"risky_write","estimated_recovery":5,"capabilities":["rollback"]}],
+        "recommended_option":"option-001", "confidence":0.95, "requires_business_input":False
+    })
+    assert plan.options[0].estimated_recovery == "5"
+
+
 def test_finding_normalizes_descriptive_objects_to_text():
     from opsswarm.skill_logic import _finding_from_agent
     f = _finding_from_agent({
@@ -85,3 +94,14 @@ def test_finding_normalizes_descriptive_objects_to_text():
     assert isinstance(f.hypothesis, str)
     assert isinstance(f.recommended_next_action, str)
     assert isinstance(f.evidence[0], str)
+
+
+def test_execution_normalizes_evidence_and_raw_shapes():
+    from opsswarm.skill_logic import _execution_from_agent
+    result = _execution_from_agent({
+        "option_id":"option-001", "success":True, "summary":"ok",
+        "evidence":[{"status":"healthy"}], "ambiguous":False,
+        "raw":"{\"ok\":true}"
+    })
+    assert isinstance(result.evidence[0], str)
+    assert result.raw == {"agent_raw":"{\"ok\":true}"}
